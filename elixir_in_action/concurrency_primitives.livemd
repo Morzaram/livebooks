@@ -1,0 +1,275 @@
+# Concurreny Primitives
+
+## Working with processes
+
+Below is an example of 5 database queries that take 2 seconds each to fire. If you need to run 5 queries to generate a page you're going to have a bad time... 10 seconds of agony
+
+```elixir
+run_query = fn query_def ->
+  Process.sleep(2000)
+  "Query result #{query_def}"
+end
+
+# Enum.map(1..5, &run_query.("query #{&1}"))
+```
+
+Well that's shit, you know what isn't? Running them concurrently. In order for us to do so, we spawn a process
+
+```elixir
+spawn(fn -> IO.puts(run_query.("query 1")) end)
+```
+
+When you run this, you can see that it spawns a process with a PID. This allows things to run in the bg. 2 seconds later you'll see the actual query return So, now lets build all 5 queries we need
+
+```elixir
+async_query = fn query_def ->
+  spawn(fn -> IO.puts(run_query.(query_def)) end)
+end
+
+Enum.map(1..5, &async_query.("query #{&1}"))
+```
+
+Damn, that's way faster now. As you can see each query spawns a process and then runs that async.
+
+Spawing processes are really good for when you just need to start something and can continue with your day... but when you need to use the data it sends back, that's when we need to implement Message passing
+
+## Message Passing
+
+Alright, that's cool but what happens if you need to do an external async query and need to pass back information, well that's where message passing comes in. What you can do is send a message to a process via the process id. You can actually see the 5 PID's above and can send to these while they're alive. Let's send a message based on patterns
+
+```elixir
+send(self(), {:poop})
+send(self(), {:pee})
+send(self(), {:not_real_message})
+send(self(), {:message, 1})
+```
+
+```elixir
+receive do
+  {:poop} -> IO.puts("I'm Pooping")
+  {:pee} -> IO.puts("I'm Peeing")
+after
+  5000 -> IO.puts("message not received")
+end
+```
+
+```elixir
+receive_result =
+  receive do
+    {:message, x} ->
+      x + 2
+  end
+```
+
+```elixir
+async_query = fn query_def ->
+  caller = self()
+
+  spawn(fn ->
+    send(caller, {:query_result, run_query.(query_def)})
+  end)
+end
+
+Enum.map(1..5, &async_query.("query #{&1}"))
+```
+
+Sending processes are left in the system until they're either received or the process restarts, so if you didn't run the code below, they'd just be chilling until this thing restarts or crashes
+
+```elixir
+get_result = fn ->
+  receive do
+    {:query_result, result} -> result
+  after
+    2300 -> IO.puts("Okay, I'm not listening any more")
+  end
+end
+
+Enum.map(1..5, fn _ -> get_result.() end)
+```
+
+Nice if you ran this once, you'll see here that you'll get the responses back of "Query result query x" but if you run it again you'll get "I'm not listening any more" (or other things in this file) This is because the mailbox is empty, and has cleared through these messages.
+
+**Let's clean up a bit**
+
+```elixir
+1..5
+|> Enum.map(&async_query.("query #{&1}"))
+|> Enum.map(fn _ -> get_result.() end)
+```
+
+Making a Process that listens for many types of events allows statefulness to exist in elixir where you can listen for many types of messages that come in. Cool thing is you can make multiple processes and send messages to both of them at the same time and it's still concurrent. This is why Phoenix is so good when it comes to ui and websites is each connection to the site opens a websocket and it's own process on the server and sends messages to the process on the server. 🔥
+
+## Server Processes
+
+A server process is a process that runs for a long time/forever that can handle various requests. To make a process run forever you have to use endless tail call recursion.
+
+This can seem like a huge issue when it comes to stackoverflow and memory alloc but the magic of tail call recursion is that it replaces itself instead of making a stack push, so it won't add anything to the stack except for when it is created. sickkk
+
+So lets's make one!
+
+```elixir
+defmodule DatabaseServer do
+  # run_async is for public facing interfacing with the DatabaseServer
+  def run_async(server_pid, query_def) do
+    send(server_pid, {:run_query, self(), query_def})
+  end
+
+  def start do
+    IO.puts("Okay I'm ready for DB queries")
+    spawn(&loop/0)
+  end
+
+  def get_result do
+    receive do
+      {:query_result, result} -> result
+    after
+      # If there's no result after 5 seconds, then I return a timeout error
+      5000 -> {:error, :timeout}
+    end
+  end
+
+  defp loop do
+    receive do
+      {:run_query, caller, query_def} ->
+        send(caller, {:query_result, run_query(query_def)})
+    end
+
+    loop()
+  end
+
+  defp run_query(query_def) do
+    Process.sleep(500)
+    "#{query_def} result"
+  end
+end
+```
+
+**Fun fact** - In elixir you don't have to implement this loop tailcall recursion yourself. They've implemented this functionality under the GenServer Module. More on that later...
+
+<!-- livebook:{"break_markdown":true} -->
+
+Cool, now that we've implemented the server lets test it out. First we need to start the Process
+
+```elixir
+server_pid = DatabaseServer.start()
+```
+
+This starts the process and is now ready to receive events
+
+```elixir
+DatabaseServer.run_async(server_pid, "'The query where I get stuff on the server'")
+DatabaseServer.get_result()
+```
+
+Alright good news is that our server is running and receiving, now lets see what happens when there's no queries and we try and get a result...
+
+```elixir
+DatabaseServer.get_result()
+```
+
+Alright, cool beans. Some interesting stuff is that the way that the db server is built is that these messages are handled in a sequential manner, so if a query take 500 seconds then the result of the last of the 5 queries will take 2.5 seconds. Well, how do we query them at the same time with this server process?
+
+We make a pool of server processes. If the pool is large enough you can divide the work among the processes and parallelize the work as much as possible. So, lets spin up 100 workers...
+
+It may seem like a lot but it's only 2kb of memory... 🤯
+
+Not only that but because they're waiting for messages, they're effectively idle and not wasting any CPU time.
+
+```elixir
+pool = Enum.map(1..100, fn _ -> DatabaseServer.start() end)
+```
+
+Coolio, now we're up and running 100 processes, lets fire some queries!
+
+```elixir
+Enum.each(
+  1..5,
+  fn query_def ->
+    server_pid = Enum.at(pool, :rand.uniform(100) - 1)
+    DatabaseServer.run_async(server_pid, query_def)
+  end
+)
+```
+
+Okay we just sent 5 messages out for a server query. Now using Enum.at is not efficient and it's better we use a map with process indexes but let's optimize later.
+
+In the mean time, let's capture the responses
+
+```elixir
+Enum.map(1..5, fn _ -> DatabaseServer.get_result() end)
+```
+
+## Adding & Keeping State on a Process
+
+Server processes can keep some process-specific state. Example you need a connection hadnle that's used to communicate with the server. If your process is responsible for TCP/ websocket communication it needs to keep/remember which socket it's talking to. Below is a new version with connection(socket) state:
+
+```elixir
+defmodule DatabaseServer do
+  # run_async is for public facing interfacing with the DatabaseServer
+  def run_async(server_pid, query_def) do
+    send(server_pid, {:run_query, self(), query_def})
+  end
+
+  def start do
+    IO.puts("Okay I'm ready for DB queries")
+
+    spawn(fn ->
+      connection = :rand.uniform(1000)
+      loop(connection)
+    end)
+  end
+
+  def get_result do
+    receive do
+      {:query_result, result} -> result
+    after
+      # If there's no result after 5 seconds, then I return a timeout error
+      5000 -> {:error, :timeout}
+    end
+  end
+
+  defp loop(connection) do
+    receive do
+      {:run_query, caller, query_def} ->
+        query_result = run_query(connection, query_def)
+        send(caller, {:query_result, query_result})
+    end
+
+    loop(connection)
+  end
+
+  defp run_query(connection, query_def) do
+    Process.sleep(500)
+    "Connection #{connection}: #{query_def} result"
+  end
+end
+```
+
+Simple enough, and now the socket that was handling the query is now displayed in the result
+
+<!-- livebook:{"break_markdown":true} -->
+
+Now, let's up new servers
+
+```elixir
+pool = Enum.map(1..100, fn _ -> DatabaseServer.start() end)
+```
+
+And then query them
+
+```elixir
+times = 1..10
+
+times
+|> Enum.each(fn query_def ->
+  server_pid = Enum.at(pool, :rand.uniform(100) - 1)
+  DatabaseServer.run_async(server_pid, query_def)
+end)
+
+times
+|> Enum.map(fn _ -> DatabaseServer.get_result() end)
+```
+
+Now that we've got that, let's keep track of some things on the server by making mutable server state
+
+## Mutable Server State (p145)
