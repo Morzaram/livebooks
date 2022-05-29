@@ -1,0 +1,79 @@
+# Day 2
+
+## Part 1
+
+```elixir
+Mix.install([:kino])
+```
+
+<!-- livebook:{"reevaluate_automatically":true} -->
+
+```elixir
+input = Kino.Input.textarea("Give me data")
+# input = """
+# forward 5
+# down 5
+# forward 8
+# up 3
+# down 8
+# forward 2
+# """
+```
+
+```elixir
+input
+|> Kino.Input.read()
+|> String.split("\n", trim: true)
+|> Enum.map(fn
+  "forward " <> number -> {0, String.to_integer(number)}
+  "up " <> number -> {-String.to_integer(number), 0}
+  "down " <> number -> {String.to_integer(number), 0}
+end)
+|> Enum.reduce({_depth = 0, _postion = 0}, fn
+  {depth_delta, position_delta}, {depth, position} ->
+    {depth + depth_delta, position + position_delta}
+end)
+|> then(fn {depth, position} -> depth * position end)
+```
+
+## Part 2
+
+```elixir
+input
+|> Kino.Input.read()
+|> String.split("\n", trim: true)
+|> Enum.map(fn
+  "forward " <> number -> {:forward, 0, String.to_integer(number), 0}
+  "up " <> number -> {:up, -String.to_integer(number), 0, -String.to_integer(number)}
+  "down " <> number -> {:down, String.to_integer(number), 0, String.to_integer(number)}
+end)
+|> Enum.reduce({_depth = 0, _postion = 0, _aim = 0}, fn
+  {:forward, _depth_delta, position_delta, aim_delta}, {depth, position, aim} ->
+    {depth + aim * position_delta, position + position_delta, aim + aim_delta}
+
+  {:up, depth_delta, position_delta, aim_delta}, {depth, position, aim} ->
+    {depth + depth_delta, position + position_delta, aim + aim_delta}
+
+  {:down, depth_delta, position_delta, aim_delta}, {depth, position, aim} ->
+    {depth + depth_delta, position + position_delta, aim + aim_delta}
+end)
+|> then(fn {depth, position, _aim} -> depth * position end)
+```
+
+```elixir
+# forward 5 with an aim of 2 = depth of 10
+```
+
+```elixir
+input
+|> Kino.Input.read()
+|> String.split()
+|> Enum.chunk_every(2)
+|> Enum.map(fn [d, n] -> [d, String.to_integer(n)] end)
+|> Enum.reduce([0, 0, 0], fn
+  ["up", n], [hor, dep, aim] -> [hor, dep, aim - n]
+  ["down", n], [hor, dep, aim] -> [hor, dep, aim + n]
+  ["forward", n], [hor, dep, aim] -> [hor + n, dep + aim * n, aim]
+end)
+|> then(fn [hor, dep, _] -> hor * dep end)
+```
